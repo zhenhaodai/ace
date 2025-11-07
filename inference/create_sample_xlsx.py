@@ -1,11 +1,17 @@
 """
 生成示例 xlsx 文件用于测试中文 claim 分解脚本
+
+文件格式：
+- 第一列：编号（ID）
+- 第二列：claim（要分解的中文陈述）
+- 第三列：人工测评结果（T/F/uncertain）
 """
 
 import pandas as pd
 import os
 
 # 示例中文 claims 数据
+# 格式：编号, claim, 人工测评结果
 sample_data = {
     'ID': [1, 2, 3, 4, 5],
     'claim': [
@@ -15,19 +21,12 @@ sample_data = {
         '这本书由赵六撰写，于2018年出版，获得了茅盾文学奖，并被翻译成20多种语言',
         '刘七是一位运动员，他在2016年里约奥运会上获得了金牌，并打破了世界纪录'
     ],
-    'source': [
-        'Wikipedia',
-        'IMDB',
-        'Forbes',
-        'Goodreads',
-        'Olympics.org'
-    ],
-    'category': [
-        '科学',
-        '娱乐',
-        '商业',
-        '文学',
-        '体育'
+    'label': [
+        'T',         # True - 支持
+        'F',         # False - 反驳
+        'uncertain', # 不确定
+        'T',         # True - 支持
+        'F'          # False - 反驳
     ]
 }
 

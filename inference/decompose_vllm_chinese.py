@@ -57,54 +57,58 @@ except Exception as e:
     print(f"读取文件失败: {e}")
     exit(1)
 
-# 检查是否存在 "claim" 列
-if 'claim' not in df.columns:
-    # 尝试使用第二列（索引为 1）
-    if len(df.columns) >= 2:
-        claim_column = df.columns[1]
-        print(f"未找到 'claim' 列，使用第二列: {claim_column}")
-    else:
-        print("错误：文件中没有足够的列")
-        exit(1)
-else:
-    claim_column = 'claim'
+# 确保至少有3列：第一列(ID)、第二列(claim)、第三列(label)
+if len(df.columns) < 3:
+    print(f"错误：文件至少需要3列，当前只有 {len(df.columns)} 列")
+    exit(1)
 
-# 提取 claim 数据
-claims = df[claim_column].dropna().tolist()
-print(f"提取到 {len(claims)} 条有效的 claim 数据")
+# 使用列的位置索引，而不是列名
+id_column = df.columns[0]      # 第一列：编号
+claim_column = df.columns[1]    # 第二列：claim
+label_column = df.columns[2]    # 第三列：人工测评结果（T/F/uncertain）
 
-# 如果数据框中有其他列，也一并保存
-metadata = []
-for idx, row in df.iterrows():
-    if pd.notna(row[claim_column]):
-        meta = {
-            "index": idx,
-            "claim": row[claim_column]
-        }
-        # 保存其他列的信息
-        for col in df.columns:
-            if col != claim_column:
-                meta[col] = row[col] if pd.notna(row[col]) else None
-        metadata.append(meta)
+print(f"第一列（编号）: {id_column}")
+print(f"第二列（Claim）: {claim_column}")
+print(f"第三列（标签）: {label_column}")
 
 # 准备提示词
 prompts = []
 contexts = []
 
 print("准备提示词...")
-for i, (claim, meta) in enumerate(zip(claims, metadata)):
+for idx, row in df.iterrows():
+    # 跳过 claim 为空的行
+    if pd.isna(row[claim_column]):
+        continue
+
+    claim = str(row[claim_column]).strip()
+    claim_id = row[id_column] if pd.notna(row[id_column]) else idx
+
+    # 处理 label：T/F/uncertain -> 标准格式
+    label_value = row[label_column] if pd.notna(row[label_column]) else "uncertain"
+    label_value = str(label_value).strip().upper()
+
+    # 转换为标准格式，符合原脚本的要求
+    if label_value in ["T", "TRUE", "SUPPORT", "SUPPORTED", "YES"]:
+        answer = ["Yes"]
+    elif label_value in ["F", "FALSE", "REFUTE", "REFUTED", "NO"]:
+        answer = ["No"]
+    else:
+        answer = ["Uncertain"]
+
     # 构建提示词
-    prompt_tmp = prompt_plan_claim_chinese.replace("{claim}", str(claim))
+    prompt_tmp = prompt_plan_claim_chinese.replace("{claim}", claim)
 
     prompts.append([
         {"role": "user", "content": prompt_tmp.strip()}
     ])
 
-    # 保存上下文信息
+    # 保存上下文信息，完全符合原脚本格式
     ctx = {
-        "claim_id": i,
-        "claim": claim,
-        "metadata": meta
+        "question": claim,      # 必需：原脚本使用 "question" 字段
+        "answer": answer,        # 必需：原脚本使用 "answer" 字段（列表格式）
+        "claim_id": claim_id,    # 额外信息：原始编号
+        "original_label": str(row[label_column]) if pd.notna(row[label_column]) else None,  # 保留原始标签
     }
     contexts.append(ctx)
 
@@ -217,15 +221,12 @@ print("生成 Excel 输出...")
 output_rows = []
 for example in examples:
     base_info = {
-        "原始Claim": example["claim"],
-        "Claim ID": example["claim_id"],
+        "Claim ID": example.get("claim_id", ""),
+        "原始Claim": example["question"],
+        "标签": example.get("original_label", ""),
+        "答案": ", ".join(example.get("answer", [])),
         "分解ID": example["decompose_id"]
     }
-
-    # 添加元数据
-    for key, value in example.get("metadata", {}).items():
-        if key not in ["claim", "index"]:
-            base_info[key] = value
 
     # 如果有分解的子陈述
     if example.get("decomposed"):
@@ -244,6 +245,6 @@ output_df.to_excel(output_excel, index=False, engine='openpyxl')
 print(f"Excel 格式已保存: {output_excel}")
 
 print(f"\n处理完成！")
-print(f"总共处理了 {len(claims)} 条 claim")
+print(f"总共处理了 {len(contexts)} 条 claim")
 print(f"生成了 {len(examples)} 个分解结果")
 print(f"所有结果已保存到: {output_dir}")
