@@ -97,7 +97,28 @@ def compute_yes_no_accuracy(prediction: str, ground_truth: str) -> float:
 
 def get_ground_truth_answer(item: Dict[str, Any], dataset: str) -> str:
     """根据数据集类型提取标准答案"""
-    # 尝试多种可能的字段名
+    # 中文数据集字段（优先检查）
+    # 检查 original_row 中的中文字段
+    if "original_row" in item:
+        original = item["original_row"]
+        # 尝试各种可能的中文字段名
+        for field in ["人工评测结果", "标准答案", "答案", "label"]:
+            if field in original and original[field]:
+                answer = original[field]
+                # 跳过 NaN 值
+                if answer != answer:  # NaN check
+                    continue
+                return str(answer)
+
+    # 直接检查根节点的中文字段
+    for field in ["人工评测结果", "标准答案", "答案"]:
+        if field in item and item[field]:
+            answer = item[field]
+            if answer != answer:  # NaN check
+                continue
+            return str(answer)
+
+    # 尝试多种可能的英文字段名
     if "answer" in item:
         return str(item["answer"])
 
