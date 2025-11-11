@@ -13,6 +13,45 @@ from typing import List, Dict, Any, Tuple
 from utils import load_jsonl
 
 
+def normalize_verdict(s: str) -> str:
+    """
+    标准化事实核查的判定结果（支持中英文）
+
+    映射规则：
+    - T/True/成立/正确/支持 → T
+    - F/False/不成立/错误/不支持 → F
+    - uncertain/不确定/证据不足/无法判断 → uncertain
+    """
+    s = s.strip().lower()
+
+    # True/成立 相关
+    if s in ['t', 'true', '成立', '正确', '支持', 'yes']:
+        return 'T'
+
+    # False/不成立 相关
+    if s in ['f', 'false', '不成立', '错误', '不支持', 'no']:
+        return 'F'
+
+    # Uncertain/不确定 相关
+    if s in ['uncertain', 'u', '不确定', '证据不足', '无法判断', '未知']:
+        return 'uncertain'
+
+    # 如果包含关键词（注意：要先检查否定形式，避免误匹配）
+    s_clean = s.replace(' ', '').replace('\n', '').replace('\t', '')
+
+    # 先检查否定形式和不确定形式
+    if any(word in s_clean for word in ['不成立', '不支持', '不正确', '错误', 'false', 'notrue']):
+        return 'F'
+    if any(word in s_clean for word in ['不确定', '证据不足', '无法判断', 'uncertain']):
+        return 'uncertain'
+    # 再检查肯定形式
+    if any(word in s_clean for word in ['成立', '正确', '支持', 'true']):
+        return 'T'
+
+    # 如果无法识别，返回原始小写文本
+    return s
+
+
 def normalize_answer(s: str) -> str:
     """标准化答案：小写化、去标点、去冠词、去多余空格"""
     def remove_articles(text):
@@ -40,13 +79,28 @@ def extract_answer_from_tags(text: str) -> str:
     return text.strip()
 
 
-def compute_exact_match(prediction: str, ground_truth: str) -> float:
+def is_fact_checking_dataset(dataset: str) -> bool:
+    """判断是否是事实核查数据集"""
+    fact_checking_datasets = ["hover", "exfever", "fever", "factcheck"]
+    return dataset.lower() in fact_checking_datasets or "fact" in dataset.lower()
+
+
+def compute_exact_match(prediction: str, ground_truth: str, is_fact_check: bool = False) -> float:
     """计算精确匹配（Exact Match）"""
-    return float(normalize_answer(prediction) == normalize_answer(ground_truth))
+    if is_fact_check:
+        # 对于事实核查任务，使用判定结果标准化
+        return float(normalize_verdict(prediction) == normalize_verdict(ground_truth))
+    else:
+        # 对于问答任务，使用传统标准化
+        return float(normalize_answer(prediction) == normalize_answer(ground_truth))
 
 
-def compute_f1(prediction: str, ground_truth: str) -> float:
+def compute_f1(prediction: str, ground_truth: str, is_fact_check: bool = False) -> float:
     """计算 F1 分数"""
+    if is_fact_check:
+        # 对于事实核查任务，F1 等同于 EM（因为是分类任务）
+        return compute_exact_match(prediction, ground_truth, is_fact_check=True)
+
     pred_tokens = normalize_answer(prediction).split()
     truth_tokens = normalize_answer(ground_truth).split()
 
@@ -166,6 +220,19 @@ def evaluate_predictions(
     yes_no_correct = 0
     has_answer_count = 0
 
+    # 判断是否是事实核查数据集（支持中文）
+    is_fact_check = is_fact_checking_dataset(dataset)
+
+    # 自动检测：如果数据包含 claim 字段且答案是 T/F/uncertain，则视为事实核查任务
+    if not is_fact_check and len(results) > 0:
+        first_item = results[0]
+        if "claim" in first_item or "claim" in first_item.get("original_row", {}):
+            ground_truth = get_ground_truth_answer(first_item, dataset)
+            if ground_truth and ground_truth.strip().upper() in ['T', 'F', 'UNCERTAIN', '成立', '不成立', '不确定']:
+                is_fact_check = True
+                if verbose:
+                    print("[Info] 检测到事实核查数据集，使用判定结果标准化")
+
     for idx, item in enumerate(results):
         # 获取生成的答案
         predicted_answer = item.get("final_answer", "")
@@ -182,8 +249,8 @@ def evaluate_predictions(
         has_answer_count += 1
 
         # 计算指标
-        em = compute_exact_match(predicted_answer, ground_truth)
-        f1 = compute_f1(predicted_answer, ground_truth)
+        em = compute_exact_match(predicted_answer, ground_truth, is_fact_check=is_fact_check)
+        f1 = compute_f1(predicted_answer, ground_truth, is_fact_check=is_fact_check)
         em_scores.append(em)
         f1_scores.append(f1)
 
@@ -198,6 +265,10 @@ def evaluate_predictions(
             print(f"  问题: {item.get('question') or item.get('claim', '')[:100]}")
             print(f"  预测: {predicted_answer[:100]}")
             print(f"  标准: {ground_truth[:100]}")
+            if is_fact_check:
+                pred_normalized = normalize_verdict(predicted_answer)
+                truth_normalized = normalize_verdict(ground_truth)
+                print(f"  标准化: 预测={pred_normalized}, 标准={truth_normalized}")
             print(f"  EM: {em:.2f}, F1: {f1:.2f}")
 
     # 计算平均指标
