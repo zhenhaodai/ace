@@ -107,8 +107,6 @@ for idx, row in df.iterrows():
     ctx = {
         "question": claim,      # 必需：原脚本使用 "question" 字段
         "answer": answer,        # 必需：原脚本使用 "answer" 字段（列表格式）
-        "claim_id": claim_id,    # 额外信息：原始编号
-        "original_label": str(row[label_column]) if pd.notna(row[label_column]) else None,  # 保留原始标签
     }
     contexts.append(ctx)
 
@@ -193,9 +191,9 @@ for i in tqdm(range(len(prompts)), desc="处理进度"):
                 "needs_context": True
             }]
 
+        ctx["question_id"] = i
         ctx["decompose_id"] = j
         ctx["decomposed"] = decomposed_claims
-        ctx["raw_output"] = generated_text
         examples.append(ctx)
 
 # 保存结果
@@ -221,9 +219,8 @@ print("生成 Excel 输出...")
 output_rows = []
 for example in examples:
     base_info = {
-        "Claim ID": example.get("claim_id", ""),
+        "Question ID": example.get("question_id", ""),
         "原始Claim": example["question"],
-        "标签": example.get("original_label", ""),
         "答案": ", ".join(example.get("answer", [])),
         "分解ID": example["decompose_id"]
     }
