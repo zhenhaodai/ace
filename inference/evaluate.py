@@ -233,6 +233,13 @@ def evaluate_predictions(
                 if verbose:
                     print("[Info] 检测到事实核查数据集，使用判定结果标准化")
 
+    # 混淆矩阵统计（用于事实核查任务）
+    confusion_matrix = {
+        'T': {'T': 0, 'F': 0, 'uncertain': 0},
+        'F': {'T': 0, 'F': 0, 'uncertain': 0},
+        'uncertain': {'T': 0, 'F': 0, 'uncertain': 0}
+    }
+
     for idx, item in enumerate(results):
         # 获取生成的答案
         predicted_answer = item.get("final_answer", "")
@@ -253,6 +260,14 @@ def evaluate_predictions(
         f1 = compute_f1(predicted_answer, ground_truth, is_fact_check=is_fact_check)
         em_scores.append(em)
         f1_scores.append(f1)
+
+        # 如果是事实核查任务，记录混淆矩阵
+        if is_fact_check:
+            pred_normalized = normalize_verdict(predicted_answer)
+            truth_normalized = normalize_verdict(ground_truth)
+            # 只统计能识别的标签
+            if pred_normalized in confusion_matrix and truth_normalized in ['T', 'F', 'uncertain']:
+                confusion_matrix[pred_normalized][truth_normalized] += 1
 
         # 对于分类任务，额外计算准确率
         if dataset in ["hover", "exfever"]:
@@ -282,6 +297,11 @@ def evaluate_predictions(
             metrics["yes_no_accuracy"] = yes_no_correct / has_answer_count * 100
 
     metrics["total_samples"] = total
+
+    # 如果是事实核查任务，添加混淆矩阵
+    if is_fact_check:
+        metrics["confusion_matrix"] = confusion_matrix
+        metrics["is_fact_check"] = True
 
     return metrics
 
@@ -328,6 +348,57 @@ def main():
 
     if "yes_no_accuracy" in metrics:
         print(f"Yes/No Accuracy: {metrics['yes_no_accuracy']:.2f}%")
+
+    # 显示混淆矩阵（如果是事实核查任务）
+    if metrics.get("is_fact_check") and "confusion_matrix" in metrics:
+        print("\n" + "=" * 80)
+        print("混淆矩阵 (Confusion Matrix):")
+        print("=" * 80)
+        cm = metrics["confusion_matrix"]
+
+        # 表头
+        header = "预测 \\ 真实"
+        print(f"{header:<15} {'T':>10} {'F':>10} {'uncertain':>10} {'总计':>10}")
+        print("-" * 57)
+
+        # 每一行
+        for pred_label in ['T', 'F', 'uncertain']:
+            row_sum = sum(cm[pred_label].values())
+            print(f"{pred_label:<15} {cm[pred_label]['T']:>10} {cm[pred_label]['F']:>10} {cm[pred_label]['uncertain']:>10} {row_sum:>10}")
+
+        # 列总计
+        col_t = sum(cm[pred]['T'] for pred in ['T', 'F', 'uncertain'])
+        col_f = sum(cm[pred]['F'] for pred in ['T', 'F', 'uncertain'])
+        col_u = sum(cm[pred]['uncertain'] for pred in ['T', 'F', 'uncertain'])
+        total_count = col_t + col_f + col_u
+
+        print("-" * 57)
+        print(f"{'总计':<15} {col_t:>10} {col_f:>10} {col_u:>10} {total_count:>10}")
+
+        # 各类别的 Precision, Recall, F1
+        print("\n" + "=" * 80)
+        print("各类别指标:")
+        print("=" * 80)
+        print(f"{'类别':<12} {'Precision':>12} {'Recall':>12} {'F1-Score':>12} {'Support':>12}")
+        print("-" * 60)
+
+        for label in ['T', 'F', 'uncertain']:
+            # Precision = TP / (TP + FP)
+            tp = cm[label][label]
+            fp = sum(cm[label][other] for other in ['T', 'F', 'uncertain'] if other != label)
+            precision = tp / (tp + fp) * 100 if (tp + fp) > 0 else 0.0
+
+            # Recall = TP / (TP + FN)
+            fn = sum(cm[other][label] for other in ['T', 'F', 'uncertain'] if other != label)
+            recall = tp / (tp + fn) * 100 if (tp + fn) > 0 else 0.0
+
+            # F1 = 2 * (Precision * Recall) / (Precision + Recall)
+            f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0.0
+
+            # Support = 真实标签为该类的样本数
+            support = sum(cm[pred][label] for pred in ['T', 'F', 'uncertain'])
+
+            print(f"{label:<12} {precision:>11.2f}% {recall:>11.2f}% {f1:>11.2f}% {support:>12}")
 
     print("=" * 80)
 
