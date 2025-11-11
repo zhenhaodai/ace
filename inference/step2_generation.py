@@ -93,7 +93,8 @@ Wrap your answer with <answer> and </answer> tags."""
 
 def process_with_retrieved_passages(item: Dict, llm_model, llm_tokenizer, sampling_params,
                                     dataset: str, add_passage: int, topk: int, lora_request=None) -> Dict:
-    question = item["question"]
+    # 兼容两种字段名：question 或 claim
+    question = item.get("question") or item.get("claim", "")
     sub_questions = item["decomposed"]
     retrieved_passages = item.get("retrieved_passages", {})
 
