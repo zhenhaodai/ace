@@ -4,6 +4,7 @@ import json
 import re
 from typing import List, Dict
 from tqdm import tqdm
+from vllm.lora.request import LoRARequest
 
 from utils import load_tokenizer, init_llm, make_sampling_params, load_jsonl, save_jsonl, call_llm
 
@@ -38,7 +39,7 @@ def zigzag_visit(lst: List) -> List:
     return result
 
 
-def answer_sub_question(sub_q: str, context_passages: List[str], model, tokenizer, sampling_params) -> str:
+def answer_sub_question(sub_q: str, context_passages: List[str], model, tokenizer, sampling_params, lora_request=None) -> str:
     if not context_passages:
         prompt = f"""Please answer the question '{sub_q}' with a short span.
 Your answer needs to be as short as possible."""
@@ -51,12 +52,12 @@ Your answer needs to be as short as possible."""
 Please answer the question '{sub_q}' with a short span using the context as reference.
 If no answer is found in the context, use your own knowledge. Your answer needs to be as short as possible."""
 
-    response = call_llm(prompt, model=model, tokenizer=tokenizer, sampling_params=sampling_params)
+    response = call_llm(prompt, model=model, tokenizer=tokenizer, sampling_params=sampling_params, lora_request=lora_request)
     return response.strip()
 
 
 def generate_final_answer(original_question: str, sub_questions: Dict[str, str], sub_answers: Dict[str, str],
-                          model, tokenizer, sampling_params, dataset: str, passages: List[str] = None, add_passage: int = 1) -> str:
+                          model, tokenizer, sampling_params, dataset: str, passages: List[str] = None, add_passage: int = 1, lora_request=None) -> str:
     sub_answer_text = "\n".join([f"### {k}: {sub_questions[k]}, Answer for {k}: {v}" for k, v in sub_answers.items()])
     final_prompt = "a short span"
 
@@ -86,13 +87,14 @@ Wrap your answer with <answer> and </answer> tags."""
 Please answer the question '{original_question}' with {final_prompt} using the subquestions as reference. Provides clear reasoning followed by a concise conclusion. If no relevant information is found, use your own knowledge.
 Wrap your answer with <answer> and </answer> tags."""
 
-    final = call_llm(prompt, model=model, tokenizer=tokenizer, sampling_params=sampling_params)
+    final = call_llm(prompt, model=model, tokenizer=tokenizer, sampling_params=sampling_params, lora_request=lora_request)
     return final.strip()
 
 
 def process_with_retrieved_passages(item: Dict, llm_model, llm_tokenizer, sampling_params,
-                                    dataset: str, add_passage: int, topk: int) -> Dict:
-    question = item["question"]
+                                    dataset: str, add_passage: int, topk: int, lora_request=None) -> Dict:
+    # 兼容两种字段名：question 或 claim
+    question = item.get("question") or item.get("claim", "")
     sub_questions = item["decomposed"]
     retrieved_passages = item.get("retrieved_passages", {})
 
@@ -116,14 +118,14 @@ def process_with_retrieved_passages(item: Dict, llm_model, llm_tokenizer, sampli
             all_passages += passages[:3]
         all_passages = list(set(all_passages))
 
-        sub_answer = answer_sub_question(q_text_resolved, passages, llm_model, llm_tokenizer, sampling_params)
+        sub_answer = answer_sub_question(q_text_resolved, passages, llm_model, llm_tokenizer, sampling_params, lora_request)
 
         answer_dict[q_label] = sub_answer
         passage_dict[q_label] = passages
         subquestions_dict[q_label] = q_text_resolved
 
     final_answer = generate_final_answer(question, subquestions_dict, answer_dict,
-                                         llm_model, llm_tokenizer, sampling_params, dataset, all_passages, add_passage)
+                                         llm_model, llm_tokenizer, sampling_params, dataset, all_passages, add_passage, lora_request)
 
     print("-------\nquestion:", question,
           "\nsub-questions:", sub_questions,
@@ -141,8 +143,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--input_file", type=str, required=True)
     parser.add_argument("--output_file", type=str, default=None)
-    parser.add_argument("--llm_model_path", type=str, required=True)
+    parser.add_argument("--llm_model_path", type=str, required=True, help="基座模型路径（需要包含 config.json）")
     parser.add_argument("--llm_tokenizer", type=str, required=True)
+    parser.add_argument("--lora_path", type=str, default=None, help="LoRA 适配器路径（可选）")
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--top_p", type=float, default=0.99)
     parser.add_argument("--tensor_parallel_size", type=int, default=1)
@@ -170,8 +173,14 @@ def main():
     print("Initializing LLM...")
     llm_tokenizer = load_tokenizer(args.llm_tokenizer)
     sampling_params = make_sampling_params(args.temperature, args.top_p, max_tokens=512)
-    llm = init_llm(args.llm_model_path, args.tensor_parallel_size)
+    llm = init_llm(args.llm_model_path, args.tensor_parallel_size, lora_path=args.lora_path)
     print("LLM initialized")
+
+    # 如果有 LoRA 路径，创建 LoRARequest
+    lora_request = None
+    if args.lora_path:
+        lora_request = LoRARequest("lora_adapter", 1, args.lora_path)
+        print(f"LoRA request created for: {args.lora_path}")
 
     results = []
     for index, item in enumerate(tqdm(items, desc="Generation")):
@@ -183,7 +192,8 @@ def main():
                 sampling_params=sampling_params,
                 dataset=args.dataset,
                 add_passage=args.add_passage,
-                topk=args.k
+                topk=args.k,
+                lora_request=lora_request
             )
 
             result_item = copy.deepcopy(item)
