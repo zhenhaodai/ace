@@ -19,30 +19,67 @@ def save_jsonl(data, path):
 def load_tokenizer(model_name, cache_dir=None):
     return AutoTokenizer.from_pretrained(model_name, cache_dir=cache_dir, trust_remote_code=True)
 
-def init_llm(model_path, tensor_parallel_size=1, gpu_memory_utilization=0.88):
-    return LLM(
-        model=model_path,
-        tensor_parallel_size=tensor_parallel_size,
-        gpu_memory_utilization=gpu_memory_utilization,
-        trust_remote_code=True
-    )
+def init_llm(model_path, tensor_parallel_size=1, gpu_memory_utilization=0.88, lora_path=None):
+    """
+    初始化 LLM，支持可选的 LoRA 适配器。
 
-def call_llm(prompt: str, model, tokenizer, sampling_params) -> str:
+    Args:
+        model_path: 基座模型路径（需要包含 config.json）
+        tensor_parallel_size: GPU 并行数量
+        gpu_memory_utilization: GPU 内存利用率
+        lora_path: LoRA 适配器路径（可选）
+    """
+    llm_kwargs = {
+        "model": model_path,
+        "tensor_parallel_size": tensor_parallel_size,
+        "gpu_memory_utilization": gpu_memory_utilization,
+        "trust_remote_code": True,
+        "disable_log_stats": True,
+    }
+
+    # 如果提供了 LoRA 路径，启用 LoRA 适配器
+    if lora_path is not None:
+        llm_kwargs["enable_lora"] = True
+        llm_kwargs["max_lora_rank"] = 64  # 根据你的 LoRA 配置调整
+
+    llm = LLM(**llm_kwargs)
+
+    # 如果启用了 LoRA，加载适配器
+    if lora_path is not None:
+        print(f"加载 LoRA 适配器: {lora_path}")
+        # vLLM 会在推理时动态加载 LoRA
+
+    return llm
+
+def call_llm(prompt: str, model, tokenizer, sampling_params, lora_request=None) -> str:
     """
     Calls the LLM using vllm's generate function.
     Applies a chat template and returns the generated text.
+
+    Args:
+        prompt: 输入提示词
+        model: vLLM 模型实例
+        tokenizer: 分词器
+        sampling_params: 采样参数
+        lora_request: LoRA 请求对象（可选）
     """
     # Prepare the chat-style input for the LLM
     prompt_input = [{"role": "user", "content": prompt.strip()}]
     # print("LLM prompt:", prompt, prompt_input)
-    
+
     # Apply chat template to build full prompt text
     text = tokenizer.apply_chat_template(
         prompt_input,
         tokenize=False,
         add_generation_prompt=True
     )
-    outputs = model.generate([text], sampling_params)
+
+    # 如果有 LoRA 请求，传递给 generate
+    if lora_request is not None:
+        outputs = model.generate([text], sampling_params, lora_request=lora_request)
+    else:
+        outputs = model.generate([text], sampling_params)
+
     # Retrieve the generated text from output
     generated_text = outputs[0].outputs[0].text
     return generated_text.strip()
