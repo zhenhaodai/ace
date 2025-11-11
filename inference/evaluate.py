@@ -9,8 +9,17 @@ import json
 import re
 import string
 from collections import Counter
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from utils import load_jsonl
+
+# Excel 相关导入（可选）
+try:
+    import pandas as pd
+    import openpyxl
+    from openpyxl.styles import Font, Alignment, PatternFill
+    EXCEL_AVAILABLE = True
+except ImportError:
+    EXCEL_AVAILABLE = False
 
 
 def normalize_verdict(s: str) -> str:
@@ -221,10 +230,11 @@ def evaluate_predictions(
     has_answer_count = 0
 
     # 判断是否是事实核查数据集（支持中文）
-    is_fact_check = is_fact_checking_dataset(dataset)
+    # 如果 dataset 为 "auto"，则完全依赖自动检测
+    is_fact_check = is_fact_checking_dataset(dataset) if dataset != "auto" else False
 
     # 自动检测：如果数据包含 claim 字段且答案是 T/F/uncertain，则视为事实核查任务
-    if not is_fact_check and len(results) > 0:
+    if (not is_fact_check or dataset == "auto") and len(results) > 0:
         first_item = results[0]
         if "claim" in first_item or "claim" in first_item.get("original_row", {}):
             ground_truth = get_ground_truth_answer(first_item, dataset)
@@ -306,17 +316,227 @@ def evaluate_predictions(
     return metrics
 
 
+def generate_comparison_excel(
+    results: List[Dict[str, Any]],
+    metrics: Dict[str, Any],
+    output_path: str,
+    dataset: str
+) -> bool:
+    """
+    生成包含原始claim、人工评测结果和模型预测结果的对比表格
+
+    Args:
+        results: 评测结果列表
+        metrics: 评测指标
+        output_path: 输出文件路径
+        dataset: 数据集类型
+    """
+    if not EXCEL_AVAILABLE:
+        print("错误: 需要安装 pandas 和 openpyxl 来生成Excel文件")
+        print("运行: pip install pandas openpyxl")
+        return False
+
+    print(f"\n正在生成对比表格: {output_path}")
+
+    # 准备数据
+    comparison_data = []
+    is_fact_check = metrics.get("is_fact_check", False)
+
+    for i, item in enumerate(results):
+        # 提取各个字段
+        claim = ""
+        if "claim" in item:
+            claim = str(item["claim"])
+        elif "original_row" in item and "claim" in item["original_row"]:
+            claim = str(item["original_row"]["claim"])
+        elif "question" in item:
+            claim = str(item["question"])
+        elif "original_row" in item and "question" in item["original_row"]:
+            claim = str(item["original_row"]["question"])
+
+        # 获取人工评测结果
+        ground_truth = get_ground_truth_answer(item, dataset)
+
+        # 获取模型预测
+        predicted_answer = item.get("final_answer", "")
+        predicted_answer = extract_answer_from_tags(predicted_answer)
+
+        # 标准化判定结果（如果是事实核查任务）
+        if is_fact_check:
+            ground_truth_normalized = normalize_verdict(ground_truth) if ground_truth else ""
+            predicted_normalized = normalize_verdict(predicted_answer) if predicted_answer else ""
+            is_match = ground_truth_normalized == predicted_normalized if (ground_truth_normalized and predicted_normalized) else None
+
+            comparison_data.append({
+                '序号': i + 1,
+                'Claim/问题': claim,
+                '人工评测结果': ground_truth,
+                '模型预测结果': predicted_answer,
+                '标准化-人工': ground_truth_normalized,
+                '标准化-模型': predicted_normalized,
+                '是否一致': '✓' if is_match else ('✗' if is_match is False else '')
+            })
+        else:
+            # 非事实核查任务，只显示基本信息
+            comparison_data.append({
+                '序号': i + 1,
+                'Question/Claim': claim,
+                '标准答案': ground_truth,
+                '模型预测': predicted_answer
+            })
+
+    # 创建DataFrame
+    df = pd.DataFrame(comparison_data)
+
+    # 创建Excel writer
+    with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+        df.to_excel(writer, sheet_name='对比结果', index=False)
+
+        # 获取工作表
+        workbook = writer.book
+        worksheet = writer.sheets['对比结果']
+
+        # 设置表头样式
+        header_fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+        header_font = Font(color='FFFFFF', bold=True)
+
+        for cell in worksheet[1]:
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+
+        # 设置列宽
+        if is_fact_check:
+            worksheet.column_dimensions['A'].width = 8   # 序号
+            worksheet.column_dimensions['B'].width = 60  # Claim
+            worksheet.column_dimensions['C'].width = 15  # 人工结果
+            worksheet.column_dimensions['D'].width = 60  # 模型结果
+            worksheet.column_dimensions['E'].width = 15  # 标准化-人工
+            worksheet.column_dimensions['F'].width = 15  # 标准化-模型
+            worksheet.column_dimensions['G'].width = 10  # 是否一致
+
+            # 为不一致的行添加颜色标记
+            error_fill = PatternFill(start_color='FFE6E6', end_color='FFE6E6', fill_type='solid')
+            correct_fill = PatternFill(start_color='E6FFE6', end_color='E6FFE6', fill_type='solid')
+
+            for row_idx, row_data in enumerate(comparison_data, start=2):
+                if row_data['是否一致'] == '✗':
+                    for col in range(1, 8):
+                        worksheet.cell(row=row_idx, column=col).fill = error_fill
+                elif row_data['是否一致'] == '✓':
+                    for col in range(1, 8):
+                        worksheet.cell(row=row_idx, column=col).fill = correct_fill
+        else:
+            worksheet.column_dimensions['A'].width = 8   # 序号
+            worksheet.column_dimensions['B'].width = 60  # Question
+            worksheet.column_dimensions['C'].width = 40  # 标准答案
+            worksheet.column_dimensions['D'].width = 60  # 模型预测
+
+        # 设置所有单元格自动换行
+        for row in worksheet.iter_rows(min_row=2, max_row=len(comparison_data) + 1):
+            for cell in row:
+                cell.alignment = Alignment(wrap_text=True, vertical='top')
+
+    print(f"✓ Excel对比表格已生成: {output_path}")
+
+    # 打印统计信息（如果是事实核查任务）
+    if is_fact_check:
+        match_count = sum(1 for d in comparison_data if d.get('是否一致') == '✓')
+        mismatch_count = sum(1 for d in comparison_data if d.get('是否一致') == '✗')
+
+        print(f"  - 一致样本: {match_count} ({match_count/len(comparison_data)*100:.2f}%)")
+        print(f"  - 不一致样本: {mismatch_count} ({mismatch_count/len(comparison_data)*100:.2f}%)")
+
+    return True
+
+
+def write_to_excel_column(
+    results: List[Dict[str, Any]],
+    excel_path: str,
+    target_column: str = 'R',
+    sheet_name: Optional[str] = None
+) -> bool:
+    """
+    将模型预测结果写入现有Excel文件的指定列
+
+    Args:
+        results: 评测结果列表
+        excel_path: Excel文件路径
+        target_column: 目标列（默认R）
+        sheet_name: 工作表名称（None表示使用活动工作表）
+    """
+    if not EXCEL_AVAILABLE:
+        print("错误: 需要安装 openpyxl 来操作Excel文件")
+        print("运行: pip install openpyxl")
+        return False
+
+    from pathlib import Path
+
+    if not Path(excel_path).exists():
+        print(f"错误: Excel文件不存在: {excel_path}")
+        return False
+
+    print(f"\n正在写入Excel文件: {excel_path}")
+
+    # 打开Excel文件
+    wb = openpyxl.load_workbook(excel_path)
+
+    # 选择工作表
+    if sheet_name:
+        if sheet_name not in wb.sheetnames:
+            print(f"错误: 工作表 '{sheet_name}' 不存在")
+            print(f"可用的工作表: {wb.sheetnames}")
+            return False
+        ws = wb[sheet_name]
+    else:
+        ws = wb.active
+
+    print(f"  工作表: {ws.title}")
+    print(f"  目标列: {target_column}")
+
+    # 写入表头
+    col_letter = target_column.upper()
+    ws[f"{col_letter}1"] = "模型预测结果"
+
+    # 写入预测结果
+    for i, item in enumerate(results):
+        predicted_answer = item.get("final_answer", "")
+        predicted_answer = extract_answer_from_tags(predicted_answer)
+
+        row_number = i + 2  # 从第2行开始（第1行是表头）
+        ws[f"{col_letter}{row_number}"] = predicted_answer
+
+    # 保存文件
+    output_path = excel_path.replace('.xlsx', '_with_predictions.xlsx')
+    wb.save(output_path)
+
+    print(f"✓ 已写入 {len(results)} 条预测结果")
+    print(f"✓ 已保存到: {output_path}")
+
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(description="评测生成答案与标准答案的匹配度")
     parser.add_argument("--input_file", type=str, required=True,
                         help="生成结果文件路径（包含 final_answer 字段的 JSONL）")
-    parser.add_argument("--dataset", type=str, default="hotpotqa",
-                        choices=["hotpotqa", "hover", "exfever", "bamboogle", "musique", "2wikimqa"],
-                        help="数据集类型")
+    parser.add_argument("--dataset", type=str, default="auto",
+                        choices=["auto", "hotpotqa", "hover", "exfever", "bamboogle", "musique", "2wikimqa"],
+                        help="数据集类型（默认：auto 自动检测）")
     parser.add_argument("--verbose", action="store_true",
                         help="是否打印详细对比信息")
     parser.add_argument("--output_file", type=str, default=None,
                         help="保存评测结果的文件路径（可选）")
+
+    # Excel 输出选项
+    parser.add_argument("--excel_comparison", type=str, default=None,
+                        help="生成Excel对比表格（包含claim、人工结果、模型结果）")
+    parser.add_argument("--write_to_excel", type=str, default=None,
+                        help="将模型预测结果写入现有Excel文件的指定列")
+    parser.add_argument("--excel_column", type=str, default="R",
+                        help="写入Excel的目标列（默认：R）")
+    parser.add_argument("--excel_sheet", type=str, default=None,
+                        help="Excel工作表名称（默认：活动工作表）")
 
     args = parser.parse_args()
 
@@ -407,6 +627,23 @@ def main():
         with open(args.output_file, 'w', encoding='utf-8') as f:
             json.dump(metrics, f, ensure_ascii=False, indent=2)
         print(f"\n评测结果已保存到: {args.output_file}")
+
+    # Excel 输出功能
+    if args.excel_comparison:
+        generate_comparison_excel(
+            results=results,
+            metrics=metrics,
+            output_path=args.excel_comparison,
+            dataset=args.dataset
+        )
+
+    if args.write_to_excel:
+        write_to_excel_column(
+            results=results,
+            excel_path=args.write_to_excel,
+            target_column=args.excel_column,
+            sheet_name=args.excel_sheet
+        )
 
 
 if __name__ == "__main__":

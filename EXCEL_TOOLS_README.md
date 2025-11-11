@@ -1,8 +1,66 @@
 # Excel 结果处理工具使用说明
 
-本目录包含两个用于处理模型预测结果的Python脚本：
+## 推荐方式：使用增强版 evaluate.py（一体化方案）
 
-## 1. write_predictions_to_excel.py
+`inference/evaluate.py` 已集成Excel输出功能，**一次运行即可完成评测和Excel生成**，无需指定数据集类型，自动检测事实核查任务。
+
+### 快速开始
+
+#### 1. 基础评测（仅终端输出）
+```bash
+python inference/evaluate.py --input_file results.jsonl
+```
+
+#### 2. 评测 + 生成对比表格（推荐！）
+```bash
+python inference/evaluate.py \
+    --input_file /path/to/decomposed_claims_answers.jsonl \
+    --excel_comparison comparison.xlsx
+```
+
+这将：
+- ✅ 在终端显示详细评测结果（EM、F1、混淆矩阵等）
+- ✅ 生成包含claim、人工结果、模型预测的对比表格
+- ✅ 自动标注一致性（绿色✓/红色✗）
+
+#### 3. 评测 + 写入现有Excel的R列
+```bash
+python inference/evaluate.py \
+    --input_file results.jsonl \
+    --write_to_excel /path/to/0918_data.xlsx \
+    --excel_column R
+```
+
+#### 4. 完整用法（评测 + 所有输出）
+```bash
+python inference/evaluate.py \
+    --input_file results.jsonl \
+    --verbose \
+    --output_file metrics.json \
+    --excel_comparison comparison.xlsx
+```
+
+### 参数说明
+
+**基础参数：**
+- `--input_file`: 预测结果JSONL文件（必需）
+- `--dataset`: 数据集类型，默认 `auto` 自动检测（可选）
+- `--verbose`: 显示详细对比信息（可选）
+- `--output_file`: 保存JSON格式的评测指标（可选）
+
+**Excel输出参数：**
+- `--excel_comparison`: 生成对比表格Excel文件路径（可选）
+- `--write_to_excel`: 写入现有Excel文件路径（可选）
+- `--excel_column`: 写入的目标列，默认R（可选）
+- `--excel_sheet`: Excel工作表名称（可选）
+
+---
+
+## 替代方案：独立脚本（向后兼容）
+
+以下两个独立脚本仍然可用，但推荐使用上面的 `evaluate.py` 一体化方案。
+
+### 1. write_predictions_to_excel.py
 
 ### 功能
 将模型预测结果写入到现有Excel文件的指定列（默认R列）
